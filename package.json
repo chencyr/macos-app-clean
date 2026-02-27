@@ -1,6 +1,6 @@
 {
   "name": "macos-app-clean",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "macOS-focused Node.js CLI tool for discovering, inspecting, and forcefully removing applications and their associated data.",
   "main": "index.js",
   "bin": {
