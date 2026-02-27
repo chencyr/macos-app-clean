@@ -1,0 +1,236 @@
+#!/usr/bin/env node
+/**
+ * macos-app-residue-scan.js
+ *
+ * 用途：
+ * - 掃描 macOS 常見安裝/殘留目錄
+ * - 以「App / Vendor 名稱」彙整殘留（只要尚未清乾淨就算）
+ *
+ * 用法：
+ *   node scan.js
+ *   node scan.js --json
+ *   node scan.js --system
+ *   node scan.js --minHits=2
+ *   node scan.js --filter=chrome
+ */
+
+const fs = require("fs");
+const path = require("path");
+const os = require("os");
+
+const argv = process.argv.slice(2);
+const hasFlag = (f) => argv.includes(f);
+const getArg = (key, def = null) => {
+  const p = argv.find((a) => a.startsWith(`--${key}=`));
+  if (!p) return def;
+  return p.slice(key.length + 3);
+};
+
+const HOME = os.homedir();
+const includeSystem = hasFlag("--system");
+const asJson = hasFlag("--json");
+const filter = (getArg("filter", "") || "").toLowerCase();
+const minHits = Number(getArg("minHits", "1")) || 1;
+
+// 你也可以自行擴充這些掃描路徑
+const scanRoots = [
+  "/Applications",
+  path.join(HOME, "Applications"),
+
+  // 使用者層級殘留（最常見）
+  path.join(HOME, "Library", "Application Support"),
+  path.join(HOME, "Library", "Preferences"),
+  path.join(HOME, "Library", "Caches"),
+  path.join(HOME, "Library", "Logs"),
+  path.join(HOME, "Library", "Saved Application State"),
+  path.join(HOME, "Library", "Containers"),
+  path.join(HOME, "Library", "Group Containers"),
+];
+
+if (includeSystem) {
+  scanRoots.push(
+    "/Library/Application Support",
+    "/Library/Preferences",
+    "/Library/Caches",
+    "/Library/Logs",
+    "/Library/LaunchAgents",
+    "/Library/LaunchDaemons"
+  );
+}
+
+// 避免掃太深造成很慢：多數殘留都在 1~2 層就能看到 app/vendor 名稱
+const MAX_DEPTH = 2;
+
+// 有些通用資料夾名不代表 app，排掉降低噪音
+const NOISE_NAMES = new Set([
+  "com.apple",
+  "Apple",
+  ".DS_Store",
+  "CrashReporter",
+  "DiagnosticReports",
+]);
+
+function safeReaddir(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    return null; // 權限/不存在就略過
+  }
+}
+
+function safeStat(p) {
+  try {
+    return fs.statSync(p);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeKey(name) {
+  // 1) 去掉副檔名 .app
+  // 2) 將常見 bundle id 轉成可閱讀 key：com.vendor.product -> vendor/product
+  let s = name.replace(/\.app$/i, "").trim();
+
+  // com.vendor.product 這種
+  if (/^[a-z0-9-]+\.[a-z0-9-]+\./i.test(s)) {
+    const parts = s.split(".");
+    // drop leading "com" / "net" / "org" / "io" / "app"
+    const drop = new Set(["com", "net", "org", "io", "app"]);
+    const kept = parts.filter((p, idx) => !(idx === 0 && drop.has(p)));
+    // key 用前兩段即可（vendor/product），避免太細碎
+    s = kept.slice(0, 3).join("/");
+  }
+
+  // 小寫 key 方便彙整
+  return s.toLowerCase();
+}
+
+function displayNameFromKey(key) {
+  // 將 vendor/product 這種 key 轉成更好看的名字
+  const parts = key.split("/");
+  const nice = parts
+    .map((p) => p.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()))
+    .join(" / ");
+  return nice || key;
+}
+
+function shouldIgnore(name) {
+  if (!name) return true;
+  if (NOISE_NAMES.has(name)) return true;
+  // 排除太泛用的資料夾
+  if (name === "Caches" || name === "Preferences" || name === "Logs") return true;
+  return false;
+}
+
+function scanDir(root) {
+  const hits = [];
+  const walk = (dir, depth) => {
+    if (depth > MAX_DEPTH) return;
+    const ents = safeReaddir(dir);
+    if (!ents) return;
+
+    for (const ent of ents) {
+      const full = path.join(dir, ent.name);
+
+      // 略過符號連結等奇怪東西（也避免循環）
+      const st = safeStat(full);
+      if (!st) continue;
+      if (st.isSymbolicLink && st.isSymbolicLink()) continue;
+
+      // 我們主要只關心「像 app/vendor 的第一層/第二層」名稱
+      if (!shouldIgnore(ent.name)) {
+        // 常見：xxx.app、com.vendor.product.plist、vendor、Product Name
+        // 用檔名/資料夾名當作聚合 key
+        const key = normalizeKey(ent.name.replace(/\.plist$/i, ""));
+        hits.push({ key, name: ent.name, path: full, root });
+      }
+
+      if (ent.isDirectory()) {
+        walk(full, depth + 1);
+      }
+    }
+  };
+
+  walk(root, 0);
+  return hits;
+}
+
+function existsDir(p) {
+  try {
+    return fs.existsSync(p) && fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function main() {
+  const allHits = [];
+  for (const root of scanRoots) {
+    if (!existsDir(root)) continue;
+    allHits.push(...scanDir(root));
+  }
+
+  // 彙整
+  const map = new Map(); // key -> {displayName, hits:[], roots:Set}
+  for (const h of allHits) {
+    if (!h.key || h.key.length < 2) continue;
+    if (filter && !h.key.includes(filter) && !h.name.toLowerCase().includes(filter)) continue;
+
+    if (!map.has(h.key)) {
+      map.set(h.key, {
+        key: h.key,
+        displayName: displayNameFromKey(h.key),
+        roots: new Set(),
+        paths: new Set(),
+        samples: [],
+      });
+    }
+    const item = map.get(h.key);
+    item.roots.add(h.root);
+    item.paths.add(h.path);
+    if (item.samples.length < 6) item.samples.push(h.path);
+  }
+
+  // 轉陣列 + minHits 過濾
+  const result = Array.from(map.values())
+    .map((x) => ({
+      key: x.key,
+      name: x.displayName,
+      hitCount: x.paths.size,
+      roots: Array.from(x.roots),
+      samplePaths: x.samples,
+      allPaths: Array.from(x.paths),
+    }))
+    .filter((x) => x.hitCount >= minHits)
+    .sort((a, b) => b.hitCount - a.hitCount || a.name.localeCompare(b.name));
+
+  if (asJson) {
+    process.stdout.write(JSON.stringify({ generatedAt: new Date().toISOString(), items: result }, null, 2));
+    return;
+  }
+
+  // 文字輸出：方便你複製做刪除清單
+  console.log(`Found ${result.length} candidate app residue groups`);
+  console.log(`Scanned roots: ${scanRoots.filter(existsDir).length}/${scanRoots.length} (use --system to include /Library)`);
+  if (filter) console.log(`Filter: ${filter}`);
+  console.log("");
+
+  for (const [idx, it] of result.entries()) {
+    console.log(`${String(idx + 1).padStart(3, " ")}. ${it.name}  (hits: ${it.hitCount})`);
+    console.log(`     key: ${it.key}`);
+    console.log(`     roots: ${it.roots.join(", ")}`);
+    console.log(`     sample paths:`);
+    for (const p of it.samplePaths) console.log(`       - ${p}`);
+    if (it.allPaths.length > it.samplePaths.length) {
+      console.log(`       ... (+${it.allPaths.length - it.samplePaths.length} more)`);
+    }
+    console.log("");
+  }
+
+  console.log("Tips:");
+  console.log("- rerun with --filter=<keyword> to narrow down (e.g., --filter=chrome)");
+  console.log("- use --json to export and then feed into your own deletion script");
+  console.log("- use --minHits=2 to reduce noise");
+}
+
+main();
