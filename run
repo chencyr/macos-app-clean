@@ -1,17 +1,29 @@
 #!/usr/bin/env node
 /**
- * macos-app-residue-scan.js
+ * macos-app-residue-tool.js
  *
- * 用途：
- * - 掃描 macOS 常見安裝/殘留目錄
- * - 以「App / Vendor 名稱」彙整殘留（只要尚未清乾淨就算）
+ * 功能：
+ * 1) 掃描 macOS 常見 App 安裝/殘留路徑，彙整成 groups
+ * 2) 可用 --delete=<AppName> 對指定 App 名稱做殘留清理
  *
  * 用法：
- *   node scan.js
- *   node scan.js --json
- *   node scan.js --system
- *   node scan.js --minHits=2
- *   node scan.js --filter=chrome
+ *   # 只掃描列出
+ *   node macos-app-residue-tool.js
+ *   node macos-app-residue-tool.js --minHits=2
+ *   node macos-app-residue-tool.js --system
+ *   node macos-app-residue-tool.js --filter=chrome
+ *
+ *   # 指定 App 清理（預設 dry-run）
+ *   node macos-app-residue-tool.js --delete=chrome
+ *
+ *   # 真的執行：移到垃圾桶（預設）
+ *   node macos-app-residue-tool.js --delete=chrome --force
+ *
+ *   # 真的執行：永久刪除（危險）
+ *   node macos-app-residue-tool.js --delete=chrome --force --rm
+ *
+ *   # 匯出 JSON
+ *   node macos-app-residue-tool.js --json > residues.json
  */
 
 const fs = require("fs");
@@ -27,17 +39,21 @@ const getArg = (key, def = null) => {
 };
 
 const HOME = os.homedir();
+const TRASH = path.join(HOME, ".Trash");
+
 const includeSystem = hasFlag("--system");
 const asJson = hasFlag("--json");
 const filter = (getArg("filter", "") || "").toLowerCase();
 const minHits = Number(getArg("minHits", "1")) || 1;
 
-// 你也可以自行擴充這些掃描路徑
+const deleteQuery = (getArg("delete", "") || "").trim().toLowerCase();
+const force = hasFlag("--force");
+const permanentRm = hasFlag("--rm"); // 若不加 --rm，預設移到垃圾桶（較安全）
+
 const scanRoots = [
   "/Applications",
   path.join(HOME, "Applications"),
 
-  // 使用者層級殘留（最常見）
   path.join(HOME, "Library", "Application Support"),
   path.join(HOME, "Library", "Preferences"),
   path.join(HOME, "Library", "Caches"),
@@ -58,23 +74,22 @@ if (includeSystem) {
   );
 }
 
-// 避免掃太深造成很慢：多數殘留都在 1~2 層就能看到 app/vendor 名稱
 const MAX_DEPTH = 2;
+const NOISE_NAMES = new Set(["com.apple", "Apple", ".DS_Store", "CrashReporter", "DiagnosticReports"]);
 
-// 有些通用資料夾名不代表 app，排掉降低噪音
-const NOISE_NAMES = new Set([
-  "com.apple",
-  "Apple",
-  ".DS_Store",
-  "CrashReporter",
-  "DiagnosticReports",
-]);
+function existsDir(p) {
+  try {
+    return fs.existsSync(p) && fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 function safeReaddir(dir) {
   try {
     return fs.readdirSync(dir, { withFileTypes: true });
-  } catch (e) {
-    return null; // 權限/不存在就略過
+  } catch {
+    return null;
   }
 }
 
@@ -86,27 +101,28 @@ function safeStat(p) {
   }
 }
 
-function normalizeKey(name) {
-  // 1) 去掉副檔名 .app
-  // 2) 將常見 bundle id 轉成可閱讀 key：com.vendor.product -> vendor/product
-  let s = name.replace(/\.app$/i, "").trim();
+function shouldIgnore(name) {
+  if (!name) return true;
+  if (NOISE_NAMES.has(name)) return true;
+  if (name === "Caches" || name === "Preferences" || name === "Logs") return true;
+  return false;
+}
 
-  // com.vendor.product 這種
+function normalizeKey(name) {
+  let s = name.replace(/\.app$/i, "").replace(/\.plist$/i, "").trim();
+
+  // bundle id 類型 -> vendor/product/...
   if (/^[a-z0-9-]+\.[a-z0-9-]+\./i.test(s)) {
     const parts = s.split(".");
-    // drop leading "com" / "net" / "org" / "io" / "app"
     const drop = new Set(["com", "net", "org", "io", "app"]);
     const kept = parts.filter((p, idx) => !(idx === 0 && drop.has(p)));
-    // key 用前兩段即可（vendor/product），避免太細碎
     s = kept.slice(0, 3).join("/");
   }
 
-  // 小寫 key 方便彙整
   return s.toLowerCase();
 }
 
 function displayNameFromKey(key) {
-  // 將 vendor/product 這種 key 轉成更好看的名字
   const parts = key.split("/");
   const nice = parts
     .map((p) => p.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()))
@@ -114,16 +130,9 @@ function displayNameFromKey(key) {
   return nice || key;
 }
 
-function shouldIgnore(name) {
-  if (!name) return true;
-  if (NOISE_NAMES.has(name)) return true;
-  // 排除太泛用的資料夾
-  if (name === "Caches" || name === "Preferences" || name === "Logs") return true;
-  return false;
-}
-
 function scanDir(root) {
   const hits = [];
+
   const walk = (dir, depth) => {
     if (depth > MAX_DEPTH) return;
     const ents = safeReaddir(dir);
@@ -131,23 +140,18 @@ function scanDir(root) {
 
     for (const ent of ents) {
       const full = path.join(dir, ent.name);
-
-      // 略過符號連結等奇怪東西（也避免循環）
       const st = safeStat(full);
       if (!st) continue;
+
+      // 避免 symlink 造成循環或誤刪
       if (st.isSymbolicLink && st.isSymbolicLink()) continue;
 
-      // 我們主要只關心「像 app/vendor 的第一層/第二層」名稱
       if (!shouldIgnore(ent.name)) {
-        // 常見：xxx.app、com.vendor.product.plist、vendor、Product Name
-        // 用檔名/資料夾名當作聚合 key
-        const key = normalizeKey(ent.name.replace(/\.plist$/i, ""));
-        hits.push({ key, name: ent.name, path: full, root });
+        const key = normalizeKey(ent.name);
+        if (key && key.length >= 2) hits.push({ key, rawName: ent.name, path: full, root });
       }
 
-      if (ent.isDirectory()) {
-        walk(full, depth + 1);
-      }
+      if (ent.isDirectory()) walk(full, depth + 1);
     }
   };
 
@@ -155,26 +159,16 @@ function scanDir(root) {
   return hits;
 }
 
-function existsDir(p) {
-  try {
-    return fs.existsSync(p) && fs.statSync(p).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function main() {
+function buildGroups() {
   const allHits = [];
   for (const root of scanRoots) {
     if (!existsDir(root)) continue;
     allHits.push(...scanDir(root));
   }
 
-  // 彙整
-  const map = new Map(); // key -> {displayName, hits:[], roots:Set}
+  const map = new Map(); // key -> group
   for (const h of allHits) {
-    if (!h.key || h.key.length < 2) continue;
-    if (filter && !h.key.includes(filter) && !h.name.toLowerCase().includes(filter)) continue;
+    if (filter && !h.key.includes(filter) && !h.rawName.toLowerCase().includes(filter)) continue;
 
     if (!map.has(h.key)) {
       map.set(h.key, {
@@ -185,52 +179,219 @@ function main() {
         samples: [],
       });
     }
-    const item = map.get(h.key);
-    item.roots.add(h.root);
-    item.paths.add(h.path);
-    if (item.samples.length < 6) item.samples.push(h.path);
+    const g = map.get(h.key);
+    g.roots.add(h.root);
+    g.paths.add(h.path);
+    if (g.samples.length < 6) g.samples.push(h.path);
   }
 
-  // 轉陣列 + minHits 過濾
-  const result = Array.from(map.values())
-    .map((x) => ({
-      key: x.key,
-      name: x.displayName,
-      hitCount: x.paths.size,
-      roots: Array.from(x.roots),
-      samplePaths: x.samples,
-      allPaths: Array.from(x.paths),
+  const groups = Array.from(map.values())
+    .map((g) => ({
+      key: g.key,
+      name: g.displayName,
+      hitCount: g.paths.size,
+      roots: Array.from(g.roots),
+      samplePaths: g.samples,
+      allPaths: Array.from(g.paths),
     }))
-    .filter((x) => x.hitCount >= minHits)
+    .filter((g) => g.hitCount >= minHits)
     .sort((a, b) => b.hitCount - a.hitCount || a.name.localeCompare(b.name));
 
-  if (asJson) {
-    process.stdout.write(JSON.stringify({ generatedAt: new Date().toISOString(), items: result }, null, 2));
-    return;
-  }
+  return groups;
+}
 
-  // 文字輸出：方便你複製做刪除清單
-  console.log(`Found ${result.length} candidate app residue groups`);
+function ensureTrashDir() {
+  try {
+    if (!existsDir(TRASH)) fs.mkdirSync(TRASH, { recursive: true });
+  } catch {
+    // 如果不行也沒關係，後面會報錯
+  }
+}
+
+function uniqueTrashPath(originalPath) {
+  const base = path.basename(originalPath);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  let dest = path.join(TRASH, `${base}__deleted__${stamp}`);
+  let i = 1;
+  while (fs.existsSync(dest)) {
+    dest = path.join(TRASH, `${base}__deleted__${stamp}__${i++}`);
+  }
+  return dest;
+}
+
+function rmRecursive(p) {
+  // Node 14+ 支援 fs.rmSync；若你環境更舊可改用 rmdirSync + 遞迴
+  fs.rmSync(p, { recursive: true, force: true });
+}
+
+function moveToTrash(p) {
+  ensureTrashDir();
+  const dest = uniqueTrashPath(p);
+  try {
+    fs.renameSync(p, dest);
+    return { ok: true, dest };
+  } catch (e) {
+    // rename 失敗時（跨磁碟/權限），退回用 copy+rm
+    // 只在檔案/資料夾可讀寫時才可能成功
+    try {
+      const st = fs.statSync(p);
+      if (st.isDirectory()) {
+        copyDir(p, dest);
+        rmRecursive(p);
+      } else {
+        fs.copyFileSync(p, dest);
+        rmRecursive(p);
+      }
+      return { ok: true, dest, fallback: "copy+rm" };
+    } catch (e2) {
+      return { ok: false, error: String(e2?.message || e2) };
+    }
+  }
+}
+
+function copyDir(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  const ents = fs.readdirSync(src, { withFileTypes: true });
+  for (const ent of ents) {
+    const s = path.join(src, ent.name);
+    const d = path.join(dest, ent.name);
+    if (ent.isDirectory()) copyDir(s, d);
+    else if (ent.isSymbolicLink()) {
+      // 不複製 symlink，避免不預期行為
+      continue;
+    } else {
+      fs.copyFileSync(s, d);
+    }
+  }
+}
+
+function matchGroups(groups, q) {
+  // 以 key/name 進行包含匹配（實務上比較好用）
+  return groups.filter((g) => g.key.includes(q) || g.name.toLowerCase().includes(q));
+}
+
+function printGroups(groups) {
+  console.log(`Found ${groups.length} candidate app residue groups`);
   console.log(`Scanned roots: ${scanRoots.filter(existsDir).length}/${scanRoots.length} (use --system to include /Library)`);
   if (filter) console.log(`Filter: ${filter}`);
   console.log("");
 
-  for (const [idx, it] of result.entries()) {
+  groups.forEach((it, idx) => {
     console.log(`${String(idx + 1).padStart(3, " ")}. ${it.name}  (hits: ${it.hitCount})`);
     console.log(`     key: ${it.key}`);
     console.log(`     roots: ${it.roots.join(", ")}`);
     console.log(`     sample paths:`);
-    for (const p of it.samplePaths) console.log(`       - ${p}`);
+    it.samplePaths.forEach((p) => console.log(`       - ${p}`));
     if (it.allPaths.length > it.samplePaths.length) {
       console.log(`       ... (+${it.allPaths.length - it.samplePaths.length} more)`);
     }
     console.log("");
+  });
+}
+
+function runDelete(groups, q) {
+  const targets = matchGroups(groups, q);
+
+  if (targets.length === 0) {
+    console.error(`No matching groups for --delete=${q}`);
+    console.error(`Tip: run without --delete first, then copy a keyword from "key" or "name".`);
+    process.exitCode = 2;
+    return;
   }
 
+  // 收斂要刪除的 path（去重）
+  const paths = new Set();
+  targets.forEach((g) => g.allPaths.forEach((p) => paths.add(p)));
+
+  const pathList = Array.from(paths).sort();
+
+  console.log(`Matched groups: ${targets.length}`);
+  targets.forEach((g) => console.log(` - ${g.name} (key: ${g.key}, hits: ${g.hitCount})`));
+  console.log("");
+  console.log(`Total unique paths to remove: ${pathList.length}`);
+  console.log(`Mode: ${force ? (permanentRm ? "PERMANENT DELETE (--rm)" : "MOVE TO TRASH") : "DRY-RUN (add --force to execute)"}`);
+  console.log("");
+
+  // Dry-run 先列出
+  pathList.forEach((p) => console.log(` - ${p}`));
+
+  if (!force) {
+    console.log("\nDry-run only. Re-run with --force to execute.");
+    if (!permanentRm) console.log("Default action is moving items to ~/.Trash (safer). Add --rm for permanent deletion.");
+    return;
+  }
+
+  console.log("\nExecuting...\n");
+
+  const results = [];
+  for (const p of pathList) {
+    // 額外安全：避免把家目錄或 Library 根砍掉
+    const normalized = path.normalize(p);
+    const dangerous = new Set([HOME, path.join(HOME, "Library"), "/Library", "/Applications"]);
+    if (dangerous.has(normalized)) {
+      results.push({ path: p, ok: false, error: "Refused: dangerous root path" });
+      continue;
+    }
+
+    try {
+      if (!fs.existsSync(p)) {
+        results.push({ path: p, ok: true, skipped: "not found" });
+        continue;
+      }
+
+      if (permanentRm) {
+        rmRecursive(p);
+        results.push({ path: p, ok: true, action: "rm" });
+      } else {
+        const r = moveToTrash(p);
+        if (r.ok) results.push({ path: p, ok: true, action: "trash", dest: r.dest, fallback: r.fallback });
+        else results.push({ path: p, ok: false, error: r.error });
+      }
+    } catch (e) {
+      results.push({ path: p, ok: false, error: String(e?.message || e) });
+    }
+  }
+
+  const ok = results.filter((r) => r.ok).length;
+  const fail = results.length - ok;
+
+  console.log(`Done. success=${ok}, failed=${fail}`);
+  if (fail) {
+    console.log("\nFailures:");
+    results
+      .filter((r) => !r.ok)
+      .slice(0, 50)
+      .forEach((r) => console.log(` - ${r.path}: ${r.error}`));
+    if (fail > 50) console.log(` ... (+${fail - 50} more)`);
+  }
+
+  if (!permanentRm) {
+    console.log(`\nMoved items are in: ${TRASH}`);
+  }
+}
+
+function main() {
+  const groups = buildGroups();
+
+  if (asJson) {
+    process.stdout.write(JSON.stringify({ generatedAt: new Date().toISOString(), items: groups }, null, 2));
+    return;
+  }
+
+  if (deleteQuery) {
+    runDelete(groups, deleteQuery);
+    return;
+  }
+
+  // 預設：只列出
+  printGroups(groups);
+
   console.log("Tips:");
-  console.log("- rerun with --filter=<keyword> to narrow down (e.g., --filter=chrome)");
-  console.log("- use --json to export and then feed into your own deletion script");
-  console.log("- use --minHits=2 to reduce noise");
+  console.log("- narrow down: --filter=<keyword> (e.g., --filter=chrome)");
+  console.log("- reduce noise: --minHits=2");
+  console.log("- include system paths: --system");
+  console.log("- delete residues: --delete=<AppName> (dry-run), add --force to execute");
+  console.log("- permanent delete: add --rm (DANGEROUS)");
 }
 
 main();
