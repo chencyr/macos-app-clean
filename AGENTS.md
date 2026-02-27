@@ -94,6 +94,31 @@ Include system-level paths:
 macos-app-clean --system
 ```
 
+Export scan result as JSON (for tooling / debugging):
+
+```bash
+macos-app-clean --json > residues.json
+```
+
+Reduce noise by requiring a minimum hit count:
+
+```bash
+macos-app-clean --minHits=2
+```
+
+Development & tests:
+
+```bash
+# install dependencies
+npm install
+
+# run unit tests (Jest)
+npm test
+
+# run CLI from source without global install
+npx macos-app-clean --filter=chrome
+```
+
 ---
 
 ## Coding Style & Conventions
@@ -105,6 +130,7 @@ macos-app-clean --system
 * Favor small, pure functions for maintainability and testability
 * Normalized identifiers must be lowercase
 * Filesystem traversal must be depth-limited (`MAX_DEPTH = 2`)
+* Permission / locking errors (e.g. EPERM, ENOTEMPTY, EBUSY) should be surfaced with clear, human-readable hints; the tool must not auto-escalate privileges or hide these failures
 
 Refactors must not change CLI flags or default behavior.
 
