@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { matchGroups } = require("./matcher");
+const { recordDeleteOperation } = require("./history");
 
 function rmRecursive(p) {
   fs.rmSync(p, { recursive: true, force: true });
@@ -223,6 +224,16 @@ function runDelete(groups, query, options) {
 
   if (!permanentRm) {
     console.log(`\nMoved items are in: ${trashDir}`);
+  }
+
+  if (force && !permanentRm && results.length) {
+    recordDeleteOperation({
+      homeDir,
+      query: q,
+      mode: "move-to-trash",
+      trashDir,
+      results,
+    });
   }
 
   return {

@@ -24,6 +24,10 @@ function parseArgs(argv) {
   const force = hasFlag(argv, "--force");
   const permanentRm = hasFlag(argv, "--rm"); // 若不加 --rm，預設移到垃圾桶（較安全）
 
+   const undoLast = hasFlag(argv, "--undo-last");
+   const undoList = hasFlag(argv, "--undo-list");
+   const undoId = (getArg(argv, "undo-id", "") || "").trim();
+
   return {
     includeSystem,
     asJson,
@@ -32,6 +36,9 @@ function parseArgs(argv) {
     deleteQuery,
     force,
     permanentRm,
+    undoLast,
+    undoList,
+    undoId,
   };
 }
 
@@ -67,6 +74,25 @@ function runCLI(argv, options) {
   const homeDir = (options && options.homeDir) || os.homedir();
   const trashDir =
     (options && options.trashDir) || path.join(homeDir, ".Trash");
+
+  if (args.undoList || args.undoLast || args.undoId) {
+    const { printUndoList, runUndoLast, runUndoById } = require("./undo");
+
+    if (args.undoList) {
+      printUndoList({ homeDir });
+      return;
+    }
+
+    if (args.undoId) {
+      runUndoById(args.undoId, { homeDir, force: args.force });
+      return;
+    }
+
+    if (args.undoLast) {
+      runUndoLast({ homeDir, force: args.force });
+      return;
+    }
+  }
 
   const { groups, scanRoots } = buildGroups({
     homeDir,

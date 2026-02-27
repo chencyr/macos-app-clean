@@ -26,6 +26,7 @@ Design philosophy:
 * **Safety by default**: dry-run and Trash-based deletion are the default behavior
 * **Force is intentional**: destructive actions require explicit confirmation
 * **Transparency over convenience**: all deletion targets are visible and auditable
+* **Recoverability when safe**: move-to-trash deletions are recorded and can be rolled back; undo actions are timestamped and visible via `macos-app-clean --undo-list`
 
 ---
 
@@ -80,6 +81,26 @@ Execute removal (safe mode: move to Trash):
 
 ```bash
 macos-app-clean --delete=chrome --force
+```
+
+List rollbackable delete operations (move-to-trash only):
+
+```bash
+macos-app-clean --undo-list
+```
+
+Restore from last delete operation (dry-run by default):
+
+```bash
+macos-app-clean --undo-last
+macos-app-clean --undo-last --force
+```
+
+Restore from a specific delete operation id (dry-run by default):
+
+```bash
+macos-app-clean --undo-id=20260227-153012-abc123
+macos-app-clean --undo-id=20260227-153012-abc123 --force
 ```
 
 Permanent removal (dangerous):

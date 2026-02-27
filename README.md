@@ -87,6 +87,31 @@ macos-app-clean --delete=chrome --force --rm
 macos-app-clean --system
 ```
 
+- **列出可 rollback 的刪除歷史紀錄**：
+
+```bash
+macos-app-clean --undo-list
+```
+
+`--undo-list` 會在每筆操作後顯示：
+
+- `lastUndo`: 最後一次 undo 的時間（若尚未 undo 則為 `-`）
+- `undos`: 被 undo 的累計次數
+
+- **檢視並還原最後一次「移到 Trash」的刪除（預設 dry-run）**：
+
+```bash
+macos-app-clean --undo-last
+macos-app-clean --undo-last --force
+```
+
+- **依指定操作 ID 檢視並還原（預設 dry-run）**：
+
+```bash
+macos-app-clean --undo-id=20260227-153012-abc123
+macos-app-clean --undo-id=20260227-153012-abc123 --force
+```
+
 - **3. 進階：輸出 JSON 結果（方便整合其他工具）**
 
 ```bash

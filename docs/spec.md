@@ -50,6 +50,23 @@ macos-app-clean 是一個 macOS 專用的 Node.js CLI 工具，用來**掃描、
   - 預設值：`1`
   - 作用：只保留命中路徑數（`hitCount`）大於等於 `n` 的 group，用於降低雜訊。
 
+- **`--undo-list`**
+  - 類型：布林 flag
+  - 作用：列出最近幾次可 rollback 的刪除操作紀錄（僅包含「移到 Trash」的刪除），包含：
+    - 操作建立時間（`time`）
+    - 最後一次被 undo 的時間（`lastUndo`，若尚未 undo 則為 `-`）
+    - 被 undo 的累計次數（`undos`）
+
+- **`--undo-last`**
+  - 類型：布林 flag
+  - 作用：針對最後一次「移到 Trash」的刪除操作建立還原計畫。
+  - 預設為 **dry-run**，只列出將被還原的路徑；需搭配 `--force` 才會實際還原。
+
+- **`--undo-id=<operationId>`**
+  - 類型：字串
+  - 作用：指定某一筆刪除操作紀錄做還原，行為同 `--undo-last`。
+  - 預設為 dry-run，需搭配 `--force` 才實際還原。
+
 ### 1.3 行為模式
 
 - **預設模式（無 `--delete`）**
