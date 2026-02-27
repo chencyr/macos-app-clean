@@ -1,0 +1,24 @@
+{
+  "name": "macos-app-clean",
+  "version": "1.0.0",
+  "description": "macOS-focused Node.js CLI tool for discovering, inspecting, and forcefully removing applications and their associated data.",
+  "main": "index.js",
+  "bin": {
+    "macos-app-clean": "./bin/macos-app-clean"
+  },
+  "scripts": {
+    "test": "jest"
+  },
+  "keywords": [
+    "macos",
+    "cli",
+    "cleanup",
+    "applications",
+    "uninstall"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
