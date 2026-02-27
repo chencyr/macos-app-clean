@@ -73,17 +73,20 @@ function moveToTrash(p, trashDir) {
       return { ok: true, dest, fallback: "copy+rm" };
     } catch (e2) {
       const msg = String(e2?.message || e2);
-      // If this is a macOS permission issue (EPERM / Operation not permitted),
+      const lower = msg.toLowerCase();
+      // If this is a macOS permission / locking issue (EPERM / ENOTEMPTY / EBUSY),
       // add a clearer hint instead of failing silently.
       if (
-        (e2 && e2.code === "EPERM") ||
-        msg.toLowerCase().includes("operation not permitted")
+        (e2 && (e2.code === "EPERM" || e2.code === "ENOTEMPTY" || e2.code === "EBUSY")) ||
+        lower.includes("operation not permitted") ||
+        lower.includes("directory not empty") ||
+        lower.includes("resource busy")
       ) {
         return {
           ok: false,
           error:
             msg +
-            " (This is likely a macOS permission restriction. Try closing the related app and granting macos-app-clean Full Disk Access. The tool will not automatically use sudo or bypass system protections.)",
+            " (This is likely a macOS permission or locking restriction. Try quitting the related app/agent, ejecting any mounted disk images, and granting macos-app-clean Full Disk Access. The tool will not automatically use sudo or bypass system protections.)",
         };
       }
       return { ok: false, error: msg };

@@ -201,7 +201,17 @@ macos-app-clean 是一個 macOS 專用的 Node.js CLI 工具，用來**掃描、
     - `<basename>__deleted__<ISO_TIMESTAMP>`，若已存在則加上 `__<n>` 遞增。
   - 優先使用 `fs.renameSync` 搬移（同磁碟時高效）。
   - 若 rename 失敗：退回為 `copyDir + rmRecursive` 策略。
+    - `copyDir` 在遞迴複製時：
+      - 目錄：呼叫自身繼續遞迴。
+      - symlink：略過，不複製，避免意外跨檔案系統。
+      - 特殊檔案 `.com.apple.containermanagerd.metadata.plist`（以及以 `.com.apple.containermanagerd.metadata` 開頭的檔案）：略過不複製，以避免 macOS Container metadata 權限問題導致整個 Trash 搬移失敗。
   - 不會複製 symlink 本身（會略過），避免不預期的跨檔案系統行為。
+  - 若在 fallback 的 `copyDir + rmRecursive` 過程中出現 macOS 權限/鎖定相關錯誤（例如 `EPERM`, `ENOTEMPTY`, `EBUSY` 或錯誤訊息包含 `operation not permitted` / `directory not empty` / `resource busy`）：
+    - 會在錯誤訊息後附加一段英文說明，提示這可能是 macOS 權限或鎖定限制，建議：
+      - 關閉相關 App 或背景 agent。
+      - 卸載掛載中的磁碟映像。
+      - 在系統設定中為 `macos-app-clean` 啟用 Full Disk Access。
+    - 工具**不會**自動使用 `sudo` 或嘗試繞過系統保護。
 
 ---
 
